@@ -1,0 +1,12 @@
+{
+  "name": "qual-coding-app",
+  "version": "0.1.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "cd frontend && npm ci && npm run build",
+    "postinstall": "cd backend && npm install",
+    "start": "NODE_ENV=production node backend/server.js"
+  }
+}

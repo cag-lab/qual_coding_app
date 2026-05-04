@@ -1,11 +1,19 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+import { existsSync } from 'fs';
 
 dotenv.config();
 
 const app = express();
-app.use(cors({ origin: 'http://localhost:5173' }));
+
+// In dev the frontend runs on a separate Vite port; in production it's same-origin.
+if (process.env.NODE_ENV !== 'production') {
+  app.use(cors({ origin: 'http://localhost:5173' }));
+}
+
 app.use(express.json({ limit: '10mb' })); // clinical notes + papers can be large
 
 const {
@@ -156,6 +164,14 @@ Rules:
 - "quote" must be an exact substring of the note (preserve punctuation/casing).
 - One passage may receive multiple codes — emit one entry per (quote, code) pair.
 - If nothing matches, return {"codings": []}.`;
+}
+
+// Serve built frontend in production
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const distPath = join(__dirname, '..', 'frontend', 'dist');
+if (existsSync(distPath)) {
+  app.use(express.static(distPath));
+  app.get('*', (_req, res) => res.sendFile(join(distPath, 'index.html')));
 }
 
 app.listen(PORT, () => {

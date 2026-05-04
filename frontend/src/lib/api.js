@@ -1,7 +1,8 @@
 // Single client for the backend proxy. The Azure key never appears here —
 // the proxy holds it. We only carry an optional shared secret.
-
-const BASE = 'http://localhost:3001';
+// In production the frontend is served from the same origin as the backend,
+// so we use relative URLs. In dev the Vite dev server proxies /api/* to :3001.
+const BASE = import.meta.env.PROD ? '' : 'http://localhost:3001';
 
 async function post(path, body, secret) {
   const res = await fetch(`${BASE}${path}`, {
