@@ -1,0 +1,45 @@
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  margin: 0;
+  background: #f7f7f8;
+  color: #1a1a1a;
+}
+.container { max-width: 960px; margin: 0 auto; padding: 24px; }
+.card {
+  background: white; border: 1px solid #e5e5e5; border-radius: 8px;
+  padding: 20px; margin-bottom: 16px;
+}
+.card h2 { margin-top: 0; }
+input, textarea, button, select {
+  font: inherit; padding: 8px 12px; border-radius: 6px; border: 1px solid #ccc;
+}
+input[type="text"], input[type="password"] { width: 100%; }
+button {
+  background: #2563eb; color: white; border: none; cursor: pointer;
+  padding: 9px 16px;
+}
+button:disabled { background: #9ca3af; cursor: not-allowed; }
+button.secondary { background: white; color: #2563eb; border: 1px solid #2563eb; }
+.row { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
+.row label { min-width: 140px; font-weight: 500; }
+.banner {
+  background: #fef3c7; border: 1px solid #fbbf24; border-radius: 6px;
+  padding: 12px; margin-bottom: 16px; font-size: 14px;
+}
+.error { color: #b91c1c; margin-top: 8px; }
+.success { color: #15803d; margin-top: 8px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #e5e5e5; vertical-align: top; font-size: 14px; }
+th { background: #f9fafb; font-size: 13px; font-weight: 600; }
+.code-pill {
+  display: inline-block; background: #dbeafe; color: #1e40af;
+  padding: 2px 8px; border-radius: 12px; font-size: 12px;
+}
+.steps { display: flex; gap: 8px; margin-bottom: 24px; }
+.step {
+  flex: 1; padding: 12px; background: white; border: 1px solid #e5e5e5;
+  border-radius: 6px; text-align: center; font-size: 14px;
+}
+.step.active { border-color: #2563eb; background: #eff6ff; font-weight: 600; }
+.step.done { background: #f0fdf4; border-color: #86efac; }
