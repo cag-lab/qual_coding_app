@@ -1,6 +1,16 @@
-# Qualitative Coding App
+# Respiratory Failure — Qualitative Coding App
 
-A React + Node app for AI-assisted qualitative coding of clinical notes using Azure OpenAI.
+A React + Node app for AI-assisted qualitative coding of clinical notes, scoped to respiratory failure, using Azure OpenAI.
+
+## Screenshots
+
+**Step 2 — Build the codebook.** Upload a paper and the model extracts a respiratory-focused coding framework, or load a previously saved codebook JSON.
+
+![Codebook step](Screenshot%202026-05-15%20at%204.17.07%E2%80%AFPM.png)
+
+**Step 3 — Code a clinical note.** Paste or upload a note, run coding, review quoted passages with assigned codes and rationale, flag corrections for re-run, then hand off to physician comparison.
+
+![Coding results step](Screenshot%202026-05-15%20at%204.38.59%E2%80%AFPM.png)
 
 ## Architecture
 
