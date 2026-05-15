@@ -3,15 +3,18 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { existsSync } from 'fs';
 
 dotenv.config();
 
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const isProd = process.env.NODE_ENV === 'production';
+
 const app = express();
 
-// In dev the frontend runs on a separate Vite port; in production it's same-origin.
-if (process.env.NODE_ENV !== 'production') {
-  app.use(cors({ origin: 'http://localhost:5173' }));
+// In production the frontend is served from the same origin, so CORS is only
+// needed locally where the dev server runs on a different port.
+if (!isProd) {
+  app.use(cors({ origin: process.env.CORS_ORIGIN ?? 'http://localhost:5173' }));
 }
 
 app.use(express.json({ limit: '10mb' })); // clinical notes + papers can be large
@@ -103,14 +106,14 @@ app.post('/api/extract-codebook', requireSecret, async (req, res) => {
 // Code a clinical note against an approved codebook
 app.post('/api/code-note', requireSecret, async (req, res) => {
   try {
-    const { noteText, codebook } = req.body;
+    const { noteText, codebook, corrections } = req.body;
     if (!noteText || !codebook) {
       return res.status(400).json({ error: 'noteText and codebook required' });
     }
 
     const result = await callAzure(
       [
-        { role: 'system', content: codingSystemPrompt(codebook) },
+        { role: 'system', content: codingSystemPrompt(codebook, corrections) },
         { role: 'user', content: `Clinical note:\n\n${noteText}` },
       ],
       { jsonMode: true, temperature: 0, seed: 42 }
@@ -124,7 +127,21 @@ app.post('/api/code-note', requireSecret, async (req, res) => {
 });
 
 // --- Prompts (kept here so backend is self-contained) -----------------------
-const CODEBOOK_SYSTEM_PROMPT = `You are a qualitative methods expert. Read the example paper and identify the qualitative coding framework the authors used.
+const CODEBOOK_SYSTEM_PROMPT = `You are a qualitative methods expert specializing in respiratory failure and critical care pulmonology. Read the example paper and identify the qualitative coding framework the authors used, focusing exclusively on concepts related to respiratory failure.
+
+Respiratory failure domains of interest include (but are not limited to):
+- Oxygenation status (SpO2, PaO2/FiO2 ratio, hypoxemia)
+- Ventilatory support (invasive mechanical ventilation, non-invasive ventilation, HFNC, CPAP/BiPAP)
+- Ventilator settings and modes (PEEP, tidal volume, FiO2, driving pressure, plateau pressure)
+- Respiratory mechanics and work of breathing
+- Weaning and liberation from mechanical ventilation / extubation
+- Airway management (intubation, tracheostomy, secretions)
+- Respiratory interventions (proning, recruitment maneuvers, inhaled agents)
+- Causes and phenotypes of respiratory failure (ARDS, pneumonia, COPD exacerbation, pulmonary edema)
+- Respiratory medications (bronchodilators, corticosteroids, pulmonary vasodilators)
+- Respiratory trajectories and outcomes (reintubation, prolonged ventilation, respiratory recovery)
+
+Do NOT extract codes related to vasopressors, hemodynamics, renal replacement therapy/dialysis, nutrition, sedation unrelated to ventilation, or other non-respiratory ICU domains.
 
 Return STRICT JSON with this shape:
 {
@@ -140,11 +157,21 @@ Return STRICT JSON with this shape:
   ]
 }
 
-Be faithful to what the paper actually used — do not invent codes the authors didn't use. If the paper describes 6 codes, return 6.`;
+Be faithful to what the paper actually used — do not invent codes the authors didn't use. If the paper describes 6 respiratory codes, return 6. Omit any codes outside the respiratory failure domain.`;
 
-function codingSystemPrompt(codebook) {
-  return `You are applying a qualitative codebook to a clinical note. Code only passages that clearly match a code's definition and inclusion criteria. When in doubt, do not code.
+function codingSystemPrompt(codebook, corrections) {
+  const correctionBlock = corrections?.length
+    ? `\nUSER CORRECTIONS from a previous coding run — apply this reasoning to all similar passages in this note:\n${
+        corrections.map((c, i) =>
+          `${i + 1}. Quote: "${c.quote}"\n   Was coded as: "${c.original_code}" → Correct code: "${c.corrected_code}"\n   Reason: ${c.reason}`
+        ).join('\n')
+      }\n`
+    : '';
 
+  return `You are applying a qualitative codebook focused on respiratory failure to a clinical note. Code only passages that clearly match a code's definition and inclusion criteria AND are related to respiratory status, ventilation, oxygenation, or airway management. When in doubt, do not code.
+
+Ignore passages about vasopressors, hemodynamic management, renal replacement therapy, dialysis, or other non-respiratory ICU interventions — even if they appear in the note.
+${correctionBlock}
 CODEBOOK:
 ${JSON.stringify(codebook, null, 2)}
 
@@ -163,18 +190,23 @@ Return STRICT JSON with this shape:
 Rules:
 - "quote" must be an exact substring of the note (preserve punctuation/casing).
 - One passage may receive multiple codes — emit one entry per (quote, code) pair.
+- Only code respiratory failure-relevant content; skip hemodynamic, renal, or other non-respiratory passages.
 - If nothing matches, return {"codings": []}.`;
 }
 
-// Serve built frontend in production
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const distPath = join(__dirname, '..', 'frontend', 'dist');
-if (existsSync(distPath)) {
-  app.use(express.static(distPath));
-  app.get('*', (_req, res) => res.sendFile(join(distPath, 'index.html')));
+// --- Health check (Azure uses this to verify the app is up) ------------------
+app.get('/health', (_req, res) => res.json({ ok: true }));
+
+// --- Static frontend (production only) ---------------------------------------
+// Vite builds into backend/public/; serve it and fall through to index.html
+// for any path that isn't an API route (SPA client-side routing).
+if (isProd) {
+  const publicDir = join(__dirname, 'public');
+  app.use(express.static(publicDir));
+  app.get('*', (_req, res) => res.sendFile(join(publicDir, 'index.html')));
 }
 
 app.listen(PORT, () => {
-  console.log(`Proxy listening on http://localhost:${PORT}`);
+  console.log(`Proxy listening on port ${PORT}`);
   if (!AZURE_OPENAI_API_KEY) console.warn('⚠️  AZURE_OPENAI_API_KEY not set');
 });

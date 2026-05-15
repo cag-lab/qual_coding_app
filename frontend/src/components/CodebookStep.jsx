@@ -79,7 +79,7 @@ export default function CodebookStep({ secret, onCodebookReady }) {
         <div style={{ flex: 1 }}>
           <p style={{ color: '#666', marginTop: 0 }}>
             <strong>Extract from paper</strong><br />
-            Upload a PDF, DOCX, or TXT and the model will identify the qualitative codes the authors used.
+            Upload a PDF, DOCX, or TXT and the model will identify respiratory failure–related qualitative codes the authors used.
           </p>
           <input type="file" accept=".pdf,.docx,.txt,.md" onChange={handlePaper} disabled={busy} />
           {busy && <div style={{ marginTop: 8 }}>Reading paper and extracting codes…</div>}
