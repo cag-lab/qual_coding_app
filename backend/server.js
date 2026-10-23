@@ -1,6 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
@@ -8,31 +10,76 @@ dotenv.config();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const isProd = process.env.NODE_ENV === 'production';
+const isDev = !isProd;
 
 const app = express();
+app.disable('x-powered-by');
+
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false,
+}));
 
 // In production the frontend is served from the same origin, so CORS is only
 // needed locally where the dev server runs on a different port.
-if (!isProd) {
-  app.use(cors({ origin: process.env.CORS_ORIGIN ?? 'http://localhost:5173' }));
+const corsOrigin = process.env.CORS_ORIGIN ?? 'http://localhost:5173';
+if (isDev) {
+  app.use(cors({ origin: corsOrigin }));
+} else if (process.env.CORS_ORIGIN) {
+  app.use(cors({ origin: corsOrigin }));
 }
 
 app.use(express.json({ limit: '10mb' })); // clinical notes + papers can be large
 
 const {
-  AZURE_OPENAI_ENDPOINT,
-  AZURE_OPENAI_API_KEY,
-  AZURE_OPENAI_DEPLOYMENT,
-  AZURE_OPENAI_API_VERSION,
+  AZURE_OPENAI_ENDPOINT: DEFAULT_AZURE_OPENAI_ENDPOINT,
+  AZURE_OPENAI_API_KEY: DEFAULT_AZURE_OPENAI_API_KEY,
+  AZURE_OPENAI_DEPLOYMENT: DEFAULT_AZURE_OPENAI_DEPLOYMENT,
+  AZURE_OPENAI_API_VERSION: DEFAULT_AZURE_OPENAI_API_VERSION,
   APP_SHARED_SECRET,
+  REQUIRE_SHARED_SECRET,
+  RATE_LIMIT_WINDOW_MS,
+  RATE_LIMIT_MAX,
   PORT = 3001,
 } = process.env;
+
+const mustRequireSharedSecret =
+  REQUIRE_SHARED_SECRET === 'true' || (isProd && REQUIRE_SHARED_SECRET !== 'false');
+
+if (mustRequireSharedSecret && !APP_SHARED_SECRET) {
+  throw new Error('APP_SHARED_SECRET is required (set APP_SHARED_SECRET or REQUIRE_SHARED_SECRET=false).');
+}
+
+const apiLimiter = rateLimit({
+  windowMs: Number(RATE_LIMIT_WINDOW_MS ?? 15 * 60 * 1000),
+  max: Number(RATE_LIMIT_MAX ?? 120),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'rate_limit_exceeded' },
+});
+
+app.use('/api', apiLimiter);
+
+function sendError(res, err) {
+  const status = Number.isInteger(err?.status) ? err.status : 500;
+  const message = err?.expose ? err.message : (status < 500 ? 'request_failed' : 'internal_server_error');
+
+  if (!err?.expose) {
+    console.error('[api_error]', {
+      status,
+      message: err?.message,
+      code: err?.code,
+    });
+  }
+
+  return res.status(status).json({ error: message });
+}
 
 // --- Auth middleware ---------------------------------------------------------
 // Optional: protect the proxy with a shared secret so it's not an open relay
 // if you ever expose it beyond localhost.
 function requireSecret(req, res, next) {
-  if (!APP_SHARED_SECRET) return next(); // disabled
+  if (!mustRequireSharedSecret && !APP_SHARED_SECRET) return next(); // local-only convenience
   if (req.header('X-App-Secret') !== APP_SHARED_SECRET) {
     return res.status(401).json({ error: 'unauthorized' });
   }
@@ -40,8 +87,32 @@ function requireSecret(req, res, next) {
 }
 
 // --- Azure call helper -------------------------------------------------------
-async function callAzure(messages, { jsonMode = false, temperature = 0, seed = 42 } = {}) {
-  const url = `${AZURE_OPENAI_ENDPOINT}/openai/deployments/${AZURE_OPENAI_DEPLOYMENT}/chat/completions?api-version=${AZURE_OPENAI_API_VERSION}`;
+function getAzureConfig(req) {
+  const bodyConfig = req.body?.azureConfig ?? {};
+
+  const endpoint = (bodyConfig.endpoint ?? DEFAULT_AZURE_OPENAI_ENDPOINT ?? '').trim();
+  const apiKey = (bodyConfig.apiKey ?? DEFAULT_AZURE_OPENAI_API_KEY ?? '').trim();
+  const deployment = (bodyConfig.deployment ?? DEFAULT_AZURE_OPENAI_DEPLOYMENT ?? '').trim();
+  const apiVersion = (bodyConfig.apiVersion ?? DEFAULT_AZURE_OPENAI_API_VERSION ?? '').trim();
+
+  const missing = [];
+  if (!endpoint) missing.push('endpoint');
+  if (!apiKey) missing.push('apiKey');
+  if (!deployment) missing.push('deployment');
+  if (!apiVersion) missing.push('apiVersion');
+
+  if (missing.length) {
+    const err = new Error(`Azure config missing: ${missing.join(', ')}`);
+    err.status = 400;
+    err.expose = true;
+    throw err;
+  }
+
+  return { endpoint: endpoint.replace(/\/$/, ''), apiKey, deployment, apiVersion };
+}
+
+async function callAzure(azureConfig, messages, { jsonMode = false, temperature = 0, seed = 42 } = {}) {
+  const url = `${azureConfig.endpoint}/openai/deployments/${azureConfig.deployment}/chat/completions?api-version=${azureConfig.apiVersion}`;
 
   const body = {
     messages,
@@ -54,14 +125,21 @@ async function callAzure(messages, { jsonMode = false, temperature = 0, seed = 4
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'api-key': AZURE_OPENAI_API_KEY, // Azure uses 'api-key', NOT 'Authorization: Bearer'
+      'api-key': azureConfig.apiKey, // Azure uses 'api-key', NOT 'Authorization: Bearer'
     },
     body: JSON.stringify(body),
   });
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Azure ${res.status}: ${text.slice(0, 500)}`);
+    const err = new Error(res.status === 429 ? 'azure_rate_limited' : 'azure_request_failed');
+    err.status = res.status === 429 ? 429 : 502;
+    err.code = `AZURE_${res.status}`;
+    console.error('[azure_error]', {
+      status: res.status,
+      body: text.slice(0, 500),
+    });
+    throw err;
   }
   return res.json();
 }
@@ -69,26 +147,35 @@ async function callAzure(messages, { jsonMode = false, temperature = 0, seed = 4
 // --- Routes ------------------------------------------------------------------
 
 // Sanity check — does the key/deployment actually work?
-app.post('/api/test-connection', requireSecret, async (_req, res) => {
+app.post('/api/test-connection', requireSecret, async (req, res) => {
   try {
+    const azureConfig = getAzureConfig(req);
     const result = await callAzure(
+      azureConfig,
       [{ role: 'user', content: 'Reply with the single word: ok' }],
       { temperature: 0 }
     );
     const reply = result.choices?.[0]?.message?.content ?? '';
     res.json({ ok: true, reply });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    const status = Number.isInteger(err?.status) ? err.status : 500;
+    const message = err?.expose ? err.message : (status < 500 ? 'request_failed' : 'internal_server_error');
+    if (!err?.expose) {
+      console.error('[api_error]', { status, message: err?.message, code: err?.code });
+    }
+    res.status(status).json({ ok: false, error: message });
   }
 });
 
 // Extract a codebook from an example paper
 app.post('/api/extract-codebook', requireSecret, async (req, res) => {
   try {
+    const azureConfig = getAzureConfig(req);
     const { paperText } = req.body;
     if (!paperText) return res.status(400).json({ error: 'paperText required' });
 
     const result = await callAzure(
+      azureConfig,
       [
         { role: 'system', content: CODEBOOK_SYSTEM_PROMPT },
         { role: 'user', content: `Example paper text:\n\n${paperText}` },
@@ -99,19 +186,21 @@ app.post('/api/extract-codebook', requireSecret, async (req, res) => {
     const raw = result.choices?.[0]?.message?.content ?? '{}';
     res.json({ codebook: JSON.parse(raw) });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err);
   }
 });
 
 // Code a clinical note against an approved codebook
 app.post('/api/code-note', requireSecret, async (req, res) => {
   try {
+    const azureConfig = getAzureConfig(req);
     const { noteText, codebook, corrections } = req.body;
     if (!noteText || !codebook) {
       return res.status(400).json({ error: 'noteText and codebook required' });
     }
 
     const result = await callAzure(
+      azureConfig,
       [
         { role: 'system', content: codingSystemPrompt(codebook, corrections) },
         { role: 'user', content: `Clinical note:\n\n${noteText}` },
@@ -122,7 +211,7 @@ app.post('/api/code-note', requireSecret, async (req, res) => {
     const raw = result.choices?.[0]?.message?.content ?? '{}';
     res.json({ codings: JSON.parse(raw) });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err);
   }
 });
 
@@ -195,6 +284,14 @@ Rules:
 }
 
 // --- Health check (Azure uses this to verify the app is up) ------------------
+app.get('/', (_req, res) => {
+  res.json({
+    ok: true,
+    service: 'qual-coding-backend',
+    message: 'Backend is running. Use POST /api/test-connection, /api/extract-codebook, or /api/code-note.',
+  });
+});
+
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
 // --- Static frontend (production only) ---------------------------------------
@@ -208,5 +305,7 @@ if (isProd) {
 
 app.listen(PORT, () => {
   console.log(`Proxy listening on port ${PORT}`);
-  if (!AZURE_OPENAI_API_KEY) console.warn('⚠️  AZURE_OPENAI_API_KEY not set');
+  if (!DEFAULT_AZURE_OPENAI_API_KEY) {
+    console.log('ℹ️  No default AZURE_OPENAI_API_KEY in env; expecting credentials from step 1 UI.');
+  }
 });
